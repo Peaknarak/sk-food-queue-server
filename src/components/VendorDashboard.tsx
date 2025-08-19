@@ -1,6 +1,6 @@
 // src/components/VendorDashboard.tsx
 import React, { useEffect, useMemo, useState } from 'react';
-import { api, Order, User } from '../lib/api';
+import { api, Order, User, MenuItem } from '../lib/api';
 import { getSocket, identifyAsVendor, joinOrderRoom } from '../lib/socket';
 import AppHeader from './AppHeader';
 import { Check, X, MessageSquare } from 'lucide-react';
@@ -13,7 +13,28 @@ export default function VendorDashboard({ user, onLogout }: { user: User; onLogo
   const [activeOrder, setActiveOrder] = useState<Order | null>(null);
   const [loadingOrders, setLoadingOrders] = useState(true);
 
+  // menus
+  const vendorId = user.vendorId || user.id; // เราสร้าง user.vendorId เป็น id ร้าน ถ้าไม่มีใช้ user.id (กรณีเดิม)
+  const [menus, setMenus] = useState<MenuItem[]>([]);
+  const [loadingMenus, setLoadingMenus] = useState(true);
+  const [newName, setNewName] = useState('');
+  const [newPrice, setNewPrice] = useState<number>(40);
+
   useEffect(()=>{ identifyAsVendor(user.id); },[user.id]);
+
+  async function loadMenus(){
+    try {
+      setLoadingMenus(true);
+      const r = await api.vendorListMenus(vendorId);
+      setMenus(r.items);
+    } catch {
+      notify.err('โหลดเมนูไม่สำเร็จ');
+    } finally {
+      setLoadingMenus(false);
+    }
+  }
+
+  useEffect(()=>{ loadMenus(); },[vendorId]);
 
   useEffect(()=>{
     (async ()=>{
@@ -31,27 +52,32 @@ export default function VendorDashboard({ user, onLogout }: { user: User; onLogo
 
   useEffect(()=>{
     const s = getSocket();
-    s.on('order:new', (o: Order)=>{ if(o.vendorId===user.id) { setOrders(prev=>[o, ...prev]); notify.info('มีออเดอร์ใหม่'); }}); 
+    s.on('order:new', (o: Order)=>{ if(o.vendorId===user.id) { setOrders(prev=>[o, ...prev]); notify.info('มีออเดอร์ใหม่'); }});
     s.on('order:paid', (o: Order)=>{ if(o.vendorId===user.id) setOrders(prev=>prev.map(x=>x.id===o.id?o:x)); });
     s.on('order:update', (o: Order)=>{ if(o.vendorId===user.id) setOrders(prev=>prev.map(x=>x.id===o.id?o:x)); });
     return ()=>{ s.off('order:new'); s.off('order:paid'); s.off('order:update'); };
   },[user.id]);
 
-  async function accept(id: string){
+  async function addMenu(){
     try{
-      const res = await api.acceptOrder(id);
-      setOrders(prev=>prev.map(x=>x.id===id?res.order:x));
-      setActiveOrder(res.order);
-      notify.ok(`รับคิวแล้ว • หมายเลขคิว ${res.order.queueNumber}`);
-    }catch{ notify.err('รับคิวไม่สำเร็จ'); }
+      if (!newName.trim() || !Number.isFinite(newPrice)) return;
+      await api.vendorCreateMenu({ vendorId, name: newName.trim(), price: Number(newPrice) });
+      setNewName(''); setNewPrice(40);
+      await loadMenus();
+      notify.ok('เพิ่มเมนูแล้ว');
+    }catch(e:any){
+      notify.err(e?.message || 'เพิ่มเมนูไม่สำเร็จ (ร้านอาจยังไม่อนุมัติ)');
+    }
   }
-  async function reject(id: string){
-    try{
-      const res = await api.rejectOrder(id);
-      setOrders(prev=>prev.map(x=>x.id===id?res.order:x));
-      setActiveOrder(res.order);
-      notify.warn('ปฏิเสธออเดอร์แล้ว');
-    }catch{ notify.err('ปฏิเสธออเดอร์ไม่สำเร็จ'); }
+  async function updateMenu(it: MenuItem, name?: string, price?: number){
+    await api.vendorUpdateMenu(it.id, { name, price });
+    await loadMenus();
+    notify.ok('อัปเดตแล้ว');
+  }
+  async function deleteMenu(it: MenuItem){
+    await api.vendorDeleteMenu(it.id);
+    await loadMenus();
+    notify.warn('ลบเมนูแล้ว');
   }
 
   const pending = useMemo(()=>orders.filter(o=>o.status==='pending_vendor_confirmation'),[orders]);
@@ -63,21 +89,54 @@ export default function VendorDashboard({ user, onLogout }: { user: User; onLogo
       <AppHeader title={`Vendor • ${user.name} (${user.id})`} onLogout={onLogout} />
 
       <div className="max-w-6xl mx-auto px-4 py-6 space-y-6">
+
+        {/* --- จัดการเมนู --- */}
+        <section className="card p-4 space-y-4">
+          <h2 className="text-lg font-medium">จัดการเมนูของร้าน</h2>
+          <div className="grid sm:grid-cols-3 gap-3">
+            <input className="border rounded-xl px-3 py-2" placeholder="ชื่อเมนู" value={newName} onChange={e=>setNewName(e.target.value)} />
+            <input className="border rounded-xl px-3 py-2" placeholder="ราคา" type="number" value={String(newPrice)} onChange={e=>setNewPrice(Number(e.target.value))} />
+            <button className="btn btn-primary" onClick={addMenu}>เพิ่มเมนู</button>
+          </div>
+
+          {loadingMenus ? <div>กำลังโหลดเมนู...</div> : (
+            <div className="space-y-2">
+              {menus.map(it=>(
+                <div key={it.id} className="border rounded-xl p-3 flex items-center justify-between gap-3">
+                  <div>
+                    <div className="font-medium">{it.name}</div>
+                    <div className="text-sm text-slate-500">{it.price} บาท</div>
+                  </div>
+                  <div className="flex gap-2">
+                    <button className="btn btn-muted" onClick={async ()=> {
+                      const name = prompt('ชื่อเมนูใหม่', it.name) ?? it.name;
+                      const priceStr = prompt('ราคาใหม่', String(it.price)) ?? String(it.price);
+                      const price = Number(priceStr);
+                      if (name && Number.isFinite(price)) await updateMenu(it, name, price);
+                    }}>แก้ไข</button>
+                    <button className="btn btn-danger" onClick={()=>deleteMenu(it)}>ลบ</button>
+                  </div>
+                </div>
+              ))}
+              {menus.length===0 && <div className="text-sm text-slate-500">ยังไม่มีเมนู</div>}
+            </div>
+          )}
+        </section>
+
+        {/* --- คอลัมน์ออเดอร์เดิม --- */}
         {loadingOrders ? <Loading label="กำลังโหลดรายการ..." /> : (
           <div className="grid md:grid-cols-3 gap-6">
             <Column title="รอการยืนยัน" highlight="badge-yellow" actions={(o)=>(<>
-              <button onClick={()=>accept(o.id)} className="btn btn-primary"><Check size={16}/> รับคิว</button>
-              <button onClick={()=>reject(o.id)} className="btn btn-danger"><X size={16}/> ปฏิเสธ</button>
+              <button onClick={async()=>{ const r=await api.acceptOrder(o.id); setOrders(prev=>prev.map(x=>x.id===o.id?r.order:x)); setActiveOrder(r.order); }} className="btn btn-primary"><Check size={16}/> รับคิว</button>
+              <button onClick={async()=>{ const r=await api.rejectOrder(o.id); setOrders(prev=>prev.map(x=>x.id===o.id?r.order:x)); setActiveOrder(r.order); }} className="btn btn-danger"><X size={16}/> ปฏิเสธ</button>
             </>)} orders={pending} onChat={(o)=>{ setActiveOrder(o); joinOrderRoom(o.id); }} />
-
             <Column title="ยืนยันแล้ว" highlight="badge-green" orders={accepted} onChat={(o)=>{ setActiveOrder(o); joinOrderRoom(o.id); }} />
-
             <Column title="ถูกปฏิเสธ" highlight="badge-red" orders={rejected} onChat={(o)=>{ setActiveOrder(o); joinOrderRoom(o.id); }} />
           </div>
         )}
 
         {activeOrder && (
-          <OrderChat orderId={activeOrder.id} me={user.id} canClear />
+          <OrderChat orderId={activeOrder.id} me={user.id} />
         )}
       </div>
     </div>
